@@ -1,0 +1,19 @@
+# Render 部署配置 — 零配置一鍵部署
+# 用戶只需把代碼推到 GitHub，Render 會自動讀取這個文件配置一切
+
+services:
+  - type: web
+    name: macau-news-portal
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: JWT_SECRET
+        value: macau-news-portal-2026-jwt-secret-key
+      - key: ADMIN_EMAILS
+        value: macauson@gmail.com
+      - key: NODE_ENV
+        value: production

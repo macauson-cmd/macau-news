@@ -1,0 +1,4 @@
+{
+  "jwtSecret": "macau-news-portal-2026-jwt-secret-key",
+  "adminEmails": ["macauson@gmail.com"]
+}

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+  <title>澳門最新聞</title>
+  <meta name="description" content="澳門最新聞 - 掌握時事動態，瞭解世界變化。提供澳門、港澳、兩岸、國際新聞資訊。" />
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="澳門最新聞">
+  <meta property="og:description" content="最新新聞資訊，掌握時事動態，瞭解世界變化">
+  
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232563eb'/%3E%3Ctext x='16' y='22' font-size='16' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='bold'%3E聞%3C/text%3E%3C/svg%3E" />
+  
+  <link rel="stylesheet" href="css/styles.css" />
+  
+  <style>
+    .loading-spinner {
+      width: 40px;
+      height: 40px;
+      border: 4px solid #e5e7eb;
+      border-top-color: #2563eb;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .admin-badge {
+      display: inline-block;
+      background: #f59e0b;
+      color: white;
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      margin-left: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- 載入中動畫 -->
+    <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:1rem;">
+      <div class="loading-spinner"></div>
+      <p style="color:#6b7280;font-size:14px;">載入中...</p>
+    </div>
+  </div>
+
+  <!-- 後端 API 配置 -->
+  <script>
+    // Render 部署：前後端同域，baseUrl 設為空字串
+    window.API_CONFIG = {
+      baseUrl: ''
+    };
+  </script>
+
+  <!-- 新聞數據（離線回退用） -->
+  <script src="js/data.js"></script>
+  <!-- 登入模組 -->
+  <script src="js/wechat-login.js"></script>
+  <!-- 主應用邏輯 -->
+  <script src="js/app.js"></script>
+</body>
+</html>

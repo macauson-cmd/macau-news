@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>微信登入中... - 澳門最新聞</title>
+  <style>
+    body { margin:0; padding:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    .callback-container {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: linear-gradient(135deg, #2563eb, #1d4ed8);
+      color: white;
+    }
+    .callback-card {
+      background: white;
+      color: #333;
+      border-radius: 16px;
+      padding: 3rem 2rem;
+      text-align: center;
+      box-shadow: 0 25px 50px -12px rgba(0,0,0,.25);
+      max-width: 400px;
+      width: 90%;
+    }
+    .spinner {
+      width: 48px;
+      height: 48px;
+      border: 4px solid #e5e7eb;
+      border-top-color: #2563eb;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 1.5rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .callback-title { font-size: 1.25rem; font-weight: 700; margin-bottom: .5rem; }
+    .callback-msg { font-size: .875rem; color: #6b7280; }
+    .error-icon { font-size: 3rem; margin-bottom: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="callback-container">
+    <div class="callback-card">
+      <div id="status-content">
+        <div class="spinner"></div>
+        <h2 class="callback-title">微信登入中</h2>
+        <p class="callback-msg">正在驗證您的身份，請稍候...</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /**
+     * OAuth 回調處理
+     * 後端在微信 OAuth 完成後，重定向到此頁面並帶上 JWT token
+     * URL 格式：/auth-callback.html?token=xxxxx
+     */
+    (async function() {
+      const API_BASE = (window.API_CONFIG && window.API_CONFIG.baseUrl) || '';
+      const urlParams = new URLSearchParams(window.location.search);
+      const token = urlParams.get('token');
+      const error = urlParams.get('error');
+      
+      const statusContent = document.getElementById('status-content');
+
+      // 錯誤處理
+      if (error) {
+        statusContent.innerHTML = `
+          <div class="error-icon">⚠️</div>
+          <h2 class="callback-title">登入失敗</h2>
+          <p class="callback-msg">${error}</p>
+          <p style="margin-top:1.5rem;"><a href="/" style="color:#2563eb;">返回首頁</a></p>
+        `;
+        return;
+      }
+
+      if (!token) {
+        statusContent.innerHTML = `
+          <div class="error-icon">⚠️</div>
+          <h2 class="callback-title">登入失敗</h2>
+          <p class="callback-msg">未收到認證令牌</p>
+          <p style="margin-top:1.5rem;"><a href="/" style="color:#2563eb;">返回首頁</a></p>
+        `;
+        return;
+      }
+
+      // 用 token 向後端驗證並獲取用戶信息
+      try {
+        const res = await fetch(`${API_BASE}/api/auth/me`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          // 儲存 JWT 和用戶信息
+          localStorage.setItem('auth_token', token);
+          localStorage.setItem('auth_user', JSON.stringify(data.user));
+
+          statusContent.innerHTML = `
+            <div style="font-size:3rem;margin-bottom:1rem;">✅</div>
+            <h2 class="callback-title">登入成功</h2>
+            <p class="callback-msg">歡迎，${data.user.nickname || '用戶'}！正在返回首頁...</p>
+          `;
+
+          setTimeout(() => {
+            window.location.href = '/';
+          }, 1500);
+        } else {
+          throw new Error('Token 驗證失敗');
+        }
+      } catch (err) {
+        statusContent.innerHTML = `
+          <div class="error-icon">⚠️</div>
+          <h2 class="callback-title">登入驗證失敗</h2>
+          <p class="callback-msg">${err.message || '請稍後重試'}</p>
+          <p style="margin-top:1.5rem;"><a href="/" style="color:#2563eb;">返回首頁</a></p>
+        `;
+      }
+    })();
+  </script>
+</body>
+</html>
