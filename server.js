@@ -243,7 +243,21 @@ app.get('/api/news/categories', (req, res) => {
 
 app.get('/api/news/:slug', (req, res) => {
   const db = readDB();
-  const article = db.articles.find(a => a.slug === req.params.slug);
+  let article = db.articles.find(a => a.slug === req.params.slug);
+  // 後備：如果按 slug 找不到，嘗試按 ID 查找
+  if (!article) {
+    const numericId = parseInt(req.params.slug);
+    if (!isNaN(numericId)) {
+      article = db.articles.find(a => a.id === numericId);
+    }
+  }
+  // 後備：嘗試 decodeURIComponent 後再匹配
+  if (!article) {
+    try {
+      const decoded = decodeURIComponent(req.params.slug);
+      article = db.articles.find(a => a.slug === decoded);
+    } catch(e) {}
+  }
   if (!article) return res.status(404).json({ error: '文章不存在' });
   article.viewCount = (article.viewCount || 0) + 1;
   writeDB(db);
@@ -258,10 +272,11 @@ app.post('/api/news', authMiddleware, adminMiddleware, (req, res) => {
   const { title, content, excerpt, category, coverImageUrl } = req.body;
   if (!title || !content) return res.status(400).json({ error: '標題和正文為必填項' });
   const db = readDB();
+  // 只用 ASCII 字符生成 slug，避免中文編碼問題
   const slugBase = title.toLowerCase()
-    .replace(/[^\w\u4e00-\u9fa5]+/g, '-')
+    .replace(/[^\w]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'article';
-  const slug = slugBase + '-' + Date.now();
+  const slug = (slugBase || 'article') + '-' + Date.now();
   const article = {
     id: db.nextId++,
     title, slug,
