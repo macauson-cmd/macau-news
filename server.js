@@ -157,7 +157,26 @@ async function githubLoad() {
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
     _githubSha = data.sha;
-    const content = Buffer.from(data.content, 'base64').toString('utf8');
+    
+    let content;
+    if (data.encoding === 'base64' && data.content) {
+      // 小文件（< 1MB）：直接從 base64 解碼
+      content = Buffer.from(data.content, 'base64').toString('utf8');
+    } else if (data.download_url) {
+      // 大文件（>= 1MB）：GitHub API 不返回內容，需用 download_url 下載原始內容
+      console.log('  文件較大 (' + Math.round(data.size / 1024) + 'KB)，使用 raw URL 下載...');
+      const rawResp = await fetch(data.download_url, {
+        headers: { 'Authorization': 'Bearer ' + GITHUB_TOKEN }
+      });
+      if (!rawResp.ok) throw new Error('raw 下載失敗: HTTP ' + rawResp.status);
+      content = await rawResp.text();
+    } else {
+      throw new Error('無法獲取文件內容（encoding: ' + data.encoding + '）');
+    }
+    
+    // 驗證下載的內容是有效的 JSON
+    JSON.parse(content);
+    
     fs.writeFileSync(DB_FILE, content, 'utf-8');
     console.log('  已從 GitHub 載入資料庫 (' + Math.round(content.length / 1024) + 'KB)');
     return true;
