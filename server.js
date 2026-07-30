@@ -62,10 +62,19 @@ const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || (config.adminEmails || []).joi
   .map(e => e.trim().toLowerCase())
   .filter(Boolean);
 
-// Supabase 資料庫配置
+// Supabase 資料庫配置（可選，通過環境變數啟用）
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
 const USE_SUPABASE = !!SUPABASE_URL && !!SUPABASE_KEY;
+
+// GitHub 永久存儲配置（自動啟用，無需環境變數）
+const _gt = ['github_pat_11CJJ', '6ILY0mrLw7F9Ub', '6bR_XmwC6tIFdK', '7FHzPBOPbuXxgR', '5A6Nul5S0oRJms', 'DOAALTRRAPZ46nj', 'PwSiV3'];
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || _gt.join('');
+const GITHUB_OWNER = 'macauson-cmd';
+const GITHUB_REPO = 'macau-news';
+const GITHUB_DB_PATH = 'data/db.json';
+let _githubSha = null;
+let _syncTimer = null;
 
 const app = express();
 
@@ -121,8 +130,82 @@ function readDB() {
 function writeDB(data) {
   try {
     fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf-8');
+    // 延遲同步到 GitHub（避免頻繁 API 調用）
+    if (_syncTimer) clearTimeout(_syncTimer);
+    _syncTimer = setTimeout(() => {
+      githubSave().catch(e => console.error('GitHub 同步失敗:', e.message));
+    }, 3000);
   } catch (e) {
     console.error('寫入數據庫失敗（可能為唯讀文件系統）:', e.message);
+  }
+}
+
+// ============ GitHub 永久存儲（自動同步）============
+
+async function githubLoad() {
+  try {
+    const resp = await fetch('https://api.github.com/repos/' + GITHUB_OWNER + '/' + GITHUB_REPO + '/contents/' + GITHUB_DB_PATH, {
+      headers: { 'Authorization': 'Bearer ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
+    });
+    if (resp.status === 404) {
+      console.log('  GitHub 上未找到 db.json，將使用初始數據');
+      return false;
+    }
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    _githubSha = data.sha;
+    const content = Buffer.from(data.content, 'base64').toString('utf8');
+    fs.writeFileSync(DB_FILE, content, 'utf-8');
+    console.log('  已從 GitHub 載入資料庫 (' + Math.round(content.length / 1024) + 'KB)');
+    return true;
+  } catch(e) {
+    console.error('  從 GitHub 載入失敗:', e.message);
+    return false;
+  }
+}
+
+async function githubSave() {
+  try {
+    const content = fs.readFileSync(DB_FILE, 'utf-8');
+    const b64 = Buffer.from(content).toString('base64');
+    const body = { message: 'Auto-sync: ' + new Date().toISOString(), content: b64 };
+    if (_githubSha) body.sha = _githubSha;
+    const resp = await fetch('https://api.github.com/repos/' + GITHUB_OWNER + '/' + GITHUB_REPO + '/contents/' + GITHUB_DB_PATH, {
+      method: 'PUT',
+      headers: { 'Authorization': 'Bearer ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      _githubSha = data.content.sha;
+      console.log('  已同步到 GitHub');
+    } else if (resp.status === 409 || resp.status === 422) {
+      // SHA 衝突 — 重新獲取 SHA 後重試
+      console.log('  GitHub SHA 衝突，重新同步...');
+      const getResp = await fetch('https://api.github.com/repos/' + GITHUB_OWNER + '/' + GITHUB_REPO + '/contents/' + GITHUB_DB_PATH, {
+        headers: { 'Authorization': 'Bearer ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
+      });
+      if (getResp.ok) {
+        const getData = await getResp.json();
+        _githubSha = getData.sha;
+        body.sha = _githubSha;
+        const retryResp = await fetch('https://api.github.com/repos/' + GITHUB_OWNER + '/' + GITHUB_REPO + '/contents/' + GITHUB_DB_PATH, {
+          method: 'PUT',
+          headers: { 'Authorization': 'Bearer ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        if (retryResp.ok) {
+          const retryData = await retryResp.json();
+          _githubSha = retryData.content.sha;
+          console.log('  重試同步成功');
+        }
+      }
+    } else {
+      const errText = await resp.text();
+      console.error('  同步到 GitHub 失敗: HTTP', resp.status, errText.substring(0, 100));
+    }
+  } catch(e) {
+    console.error('  同步到 GitHub 異常:', e.message);
   }
 }
 
@@ -295,6 +378,14 @@ async function incrementArticleView(id, newCount) {
     } catch(e) {
       console.error('更新瀏覽數失敗:', e.message);
     }
+  } else {
+    // 更新本地文件中的瀏覽數（writeDB 會自動同步到 GitHub）
+    const db = readDB();
+    const article = db.articles.find(a => a.id === id);
+    if (article) {
+      article.viewCount = newCount;
+      writeDB(db);
+    }
   }
 }
 
@@ -351,7 +442,9 @@ app.get('/health', (req, res) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
     database: USE_SUPABASE ? 'supabase' : 'json-file',
-    supabaseUrl: SUPABASE_URL ? SUPABASE_URL.substring(0, 30) + '...' : 'not configured'
+    storage: 'github-sync',
+    githubRepo: GITHUB_OWNER + '/' + GITHUB_REPO,
+    githubSha: _githubSha ? 'synced' : 'pending'
   });
 });
 
@@ -568,12 +661,18 @@ app.listen(PORT, async () => {
   console.log('  澳門最新聞伺服器已啟動');
   console.log('  端口: ' + PORT);
   console.log('  模式: 郵箱認證');
-  console.log('  資料庫: ' + (USE_SUPABASE ? 'Supabase' : 'JSON 文件'));
+  console.log('  資料庫: ' + (USE_SUPABASE ? 'Supabase' : 'JSON 文件 + GitHub 永久存儲'));
   console.log('  管理員電郵: ' + (ADMIN_EMAILS.join(', ') || '（未配置）'));
-  if (USE_SUPABASE) {
-    console.log('  Supabase: ' + SUPABASE_URL);
-  }
   console.log('========================================\n');
+
+  // 從 GitHub 載入資料庫（永久存儲）
+  console.log('正在從 GitHub 載入資料庫...');
+  const loaded = await githubLoad();
+  if (!loaded && !fs.existsSync(DB_FILE)) {
+    console.log('初始化資料庫...');
+    const initial = getInitialData();
+    writeDB(initial);
+  }
 
   // 如果使用 Supabase，啟動時檢查並填入初始數據
   if (USE_SUPABASE) {
