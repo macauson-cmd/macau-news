@@ -1,12 +1,15 @@
 /**
- * 澳門最新聞 - 後端伺服器（Render 雲端自包含版）
+ * 澳門最新聞 - 後端伺服器（Render 雲端自包含版 + Supabase 資料庫）
  * 所有前端文件已嵌入此文件，無需額外上傳 js/ 或 css/ 目錄
  *
  * 部署方式：
  * 1. 將此文件和 package.json 上傳到 GitHub
  * 2. 在 Render 創建 Web Service，選擇該 GitHub 倉庫
- * 3. 設置環境變數 ADMIN_EMAILS=macauson@gmail.com
- * 4. 自動部署完成
+ * 3. 設置環境變數：
+ *    - ADMIN_EMAILS=macauson@gmail.com
+ *    - SUPABASE_URL=https://xxxxx.supabase.co
+ *    - SUPABASE_KEY=sb_secret_xxxxx
+ * 4. 自動部署完成，新聞數據永久保存
  */
 
 const express = require('express');
@@ -59,6 +62,11 @@ const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || (config.adminEmails || []).joi
   .map(e => e.trim().toLowerCase())
   .filter(Boolean);
 
+// Supabase 資料庫配置
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
+const USE_SUPABASE = !!SUPABASE_URL && !!SUPABASE_KEY;
+
 const app = express();
 
 // ============ 目錄初始化 + 提取嵌入文件 ============
@@ -90,7 +98,7 @@ function getInitialData() {
   }
 }
 
-// ============ JSON 文件數據庫 ============
+// ============ JSON 文件數據庫（無 SupabASE 時回退用）============
 
 const DB_FILE = path.join(dataDir, 'news.json');
 
@@ -118,11 +126,202 @@ function writeDB(data) {
   }
 }
 
+// ============ Supabase 資料庫輔助函數 ============
+
+async function supabaseRequest(method, tablePath, body) {
+  const url = SUPABASE_URL + '/rest/v1/' + tablePath;
+  const headers = {
+    'apikey': SUPABASE_KEY,
+    'Authorization': 'Bearer ' + SUPABASE_KEY,
+    'Content-Type': 'application/json'
+  };
+  const options = { method, headers };
+  if (body !== undefined && body !== null) {
+    headers['Prefer'] = 'return=representation';
+    options.body = JSON.stringify(body);
+  }
+  const res = await fetch(url, options);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error('Supabase ' + method + ' ' + tablePath + ': ' + res.status + ' ' + text);
+  }
+  const text = await res.text();
+  if (!text) return [];
+  return JSON.parse(text);
+}
+
+// 資料庫行 → 前端文章物件（snake_case → camelCase）
+function dbToArticle(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    title: row.title,
+    slug: row.slug,
+    excerpt: row.excerpt,
+    content: row.content,
+    coverImageUrl: row.cover_image_url || '',
+    publishedAt: row.published_at,
+    viewCount: row.view_count || 0,
+    category: row.category,
+    author: row.author
+  };
+}
+
+// 前端文章物件 → 資料庫行（camelCase → snake_case）
+function articleToDb(article) {
+  return {
+    id: article.id,
+    title: article.title,
+    slug: article.slug,
+    excerpt: article.excerpt,
+    content: article.content,
+    cover_image_url: article.coverImageUrl || '',
+    published_at: article.publishedAt,
+    view_count: article.viewCount || 0,
+    category: article.category,
+    author: article.author
+  };
+}
+
+// ============ 資料存取（雙模式：Supabase 或 JSON 文件）============
+
+async function fetchAllArticles() {
+  if (USE_SUPABASE) {
+    try {
+      const rows = await supabaseRequest('GET', 'articles?order=published_at.desc');
+      return rows.map(dbToArticle);
+    } catch(e) {
+      console.error('Supabase 查詢失敗，回退到靜態數據:', e.message);
+      return getInitialData().articles;
+    }
+  } else {
+    return readDB().articles;
+  }
+}
+
+async function findArticle(slug) {
+  if (USE_SUPABASE) {
+    try {
+      let rows = await supabaseRequest('GET', 'articles?slug=eq.' + encodeURIComponent(slug) + '&limit=1');
+      if (rows.length === 0 && !isNaN(parseInt(slug))) {
+        rows = await supabaseRequest('GET', 'articles?id=eq.' + slug + '&limit=1');
+      }
+      if (rows.length === 0) {
+        try {
+          const decoded = decodeURIComponent(slug);
+          if (decoded !== slug) {
+            rows = await supabaseRequest('GET', 'articles?slug=eq.' + encodeURIComponent(decoded) + '&limit=1');
+          }
+        } catch(e2) {}
+      }
+      return rows.length > 0 ? dbToArticle(rows[0]) : null;
+    } catch(e) {
+      console.error('Supabase 查詢失敗:', e.message);
+      return null;
+    }
+  } else {
+    const db = readDB();
+    let article = db.articles.find(a => a.slug === slug);
+    if (!article) {
+      const numericId = parseInt(slug);
+      if (!isNaN(numericId)) {
+        article = db.articles.find(a => a.id === numericId);
+      }
+    }
+    if (!article) {
+      try {
+        const decoded = decodeURIComponent(slug);
+        article = db.articles.find(a => a.slug === decoded);
+      } catch(e) {}
+    }
+    return article;
+  }
+}
+
+async function insertArticleRecord(article) {
+  if (USE_SUPABASE) {
+    const rows = await supabaseRequest('POST', 'articles', articleToDb(article));
+    return rows.length > 0 ? dbToArticle(rows[0]) : article;
+  } else {
+    const db = readDB();
+    db.articles.unshift(article);
+    db.nextId = Math.max(db.nextId, article.id + 1);
+    writeDB(db);
+    return article;
+  }
+}
+
+async function updateArticleRecord(id, fields) {
+  if (USE_SUPABASE) {
+    const dbFields = {};
+    if (fields.title !== undefined) dbFields.title = fields.title;
+    if (fields.content !== undefined) dbFields.content = fields.content;
+    if (fields.excerpt !== undefined) dbFields.excerpt = fields.excerpt;
+    if (fields.category !== undefined) dbFields.category = fields.category;
+    if (fields.coverImageUrl !== undefined) dbFields.cover_image_url = fields.coverImageUrl;
+    const rows = await supabaseRequest('PATCH', 'articles?id=eq.' + id, dbFields);
+    return rows.length > 0 ? dbToArticle(rows[0]) : null;
+  } else {
+    const db = readDB();
+    const article = db.articles.find(a => a.id === parseInt(id));
+    if (!article) return null;
+    if (fields.title !== undefined) article.title = fields.title;
+    if (fields.content !== undefined) article.content = fields.content;
+    if (fields.excerpt !== undefined) article.excerpt = fields.excerpt;
+    if (fields.category !== undefined) article.category = fields.category;
+    if (fields.coverImageUrl !== undefined) article.coverImageUrl = fields.coverImageUrl;
+    writeDB(db);
+    return article;
+  }
+}
+
+async function deleteArticleRecord(id) {
+  if (USE_SUPABASE) {
+    await supabaseRequest('DELETE', 'articles?id=eq.' + id);
+  } else {
+    const db = readDB();
+    const idx = db.articles.findIndex(a => a.id === parseInt(id));
+    if (idx !== -1) {
+      db.articles.splice(idx, 1);
+      writeDB(db);
+    }
+  }
+}
+
+async function incrementArticleView(id, newCount) {
+  if (USE_SUPABASE) {
+    try {
+      await supabaseRequest('PATCH', 'articles?id=eq.' + id, { view_count: newCount });
+    } catch(e) {
+      console.error('更新瀏覽數失敗:', e.message);
+    }
+  }
+}
+
+async function seedIfEmpty() {
+  if (!USE_SUPABASE) return;
+  try {
+    const rows = await supabaseRequest('GET', 'articles?select=id&limit=1');
+    if (rows.length === 0) {
+      console.log('資料庫為空，開始填入初始新聞數據...');
+      const data = getInitialData();
+      for (const article of data.articles) {
+        await supabaseRequest('POST', 'articles', articleToDb(article));
+      }
+      console.log('已填入 ' + data.articles.length + ' 篇初始新聞');
+    } else {
+      console.log('資料庫已有數據，跳過初始化');
+    }
+  } catch(e) {
+    console.error('檢查資料庫失敗:', e.message);
+  }
+}
+
 // ============ 中間件 ============
 
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: '12mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '20mb' }));
+app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -148,22 +347,18 @@ function adminMiddleware(req, res, next) {
 // ============ 健康檢查 ============
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    database: USE_SUPABASE ? 'supabase' : 'json-file',
+    supabaseUrl: SUPABASE_URL ? SUPABASE_URL.substring(0, 30) + '...' : 'not configured'
+  });
 });
 
-// ============ 圖片上傳配置 ============
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadsDir),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '.jpg';
-    const name = Date.now() + '-' + crypto.randomBytes(6).toString('hex') + ext;
-    cb(null, name);
-  }
-});
+// ============ 圖片上傳配置（記憶體存儲，轉為 Data URL）============
 
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) cb(null, true);
@@ -204,130 +399,156 @@ app.post('/api/auth/logout', (req, res) => {
 
 // ============ 新聞 API ============
 
-app.get('/api/news', (req, res) => {
-  const db = readDB();
-  let articles = [...db.articles];
-  articles.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
-  const { category, search } = req.query;
-  if (category && category !== 'all') {
-    const catMap = { 'macau': '澳門', 'hk-macau': '港澳', 'cross-strait': '兩岸', 'international': '國際', 'military': '軍事' };
-    const catName = catMap[category] || category;
-    articles = articles.filter(a => a.category === catName);
+app.get('/api/news', async (req, res) => {
+  try {
+    let articles = await fetchAllArticles();
+    articles.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+    const { category, search } = req.query;
+    if (category && category !== 'all') {
+      const catMap = { 'macau': '澳門', 'hk-macau': '港澳', 'cross-strait': '兩岸', 'international': '國際', 'military': '軍事' };
+      const catName = catMap[category] || category;
+      articles = articles.filter(a => a.category === catName);
+    }
+    if (search && search.trim()) {
+      const q = search.trim().toLowerCase();
+      articles = articles.filter(a =>
+        (a.title && a.title.toLowerCase().includes(q)) ||
+        (a.excerpt && a.excerpt.toLowerCase().includes(q)) ||
+        (a.content && a.content.toLowerCase().includes(q))
+      );
+    }
+    const page = parseInt(req.query.page) || 1;
+    const pageSize = parseInt(req.query.pageSize) || 50;
+    const total = articles.length;
+    const startIdx = (page - 1) * pageSize;
+    const pageArticles = articles.slice(startIdx, startIdx + pageSize);
+    res.json({ articles: pageArticles, total, page, pageSize, totalPages: Math.ceil(total / pageSize) });
+  } catch(e) {
+    console.error('GET /api/news 錯誤:', e.message);
+    res.status(500).json({ error: '伺服器錯誤' });
   }
-  if (search && search.trim()) {
-    const q = search.trim().toLowerCase();
-    articles = articles.filter(a =>
-      (a.title && a.title.toLowerCase().includes(q)) ||
-      (a.excerpt && a.excerpt.toLowerCase().includes(q)) ||
-      (a.content && a.content.toLowerCase().includes(q))
-    );
-  }
-  const page = parseInt(req.query.page) || 1;
-  const pageSize = parseInt(req.query.pageSize) || 50;
-  const total = articles.length;
-  const startIdx = (page - 1) * pageSize;
-  const pageArticles = articles.slice(startIdx, startIdx + pageSize);
-  res.json({ articles: pageArticles, total, page, pageSize, totalPages: Math.ceil(total / pageSize) });
 });
 
-app.get('/api/news/trending', (req, res) => {
-  const db = readDB();
-  const trending = (db.trendingIds || []).map(id => db.articles.find(a => a.id === id)).filter(Boolean);
-  res.json({ articles: trending });
+app.get('/api/news/trending', async (req, res) => {
+  try {
+    const allArticles = await fetchAllArticles();
+    const data = getInitialData();
+    const trending = (data.trendingIds || []).map(id => allArticles.find(a => a.id === id)).filter(Boolean);
+    res.json({ articles: trending });
+  } catch(e) {
+    console.error('GET /api/news/trending 錯誤:', e.message);
+    res.status(500).json({ error: '伺服器錯誤' });
+  }
 });
 
 app.get('/api/news/categories', (req, res) => {
-  const db = readDB();
-  res.json({ categories: db.categories || [] });
+  const data = getInitialData();
+  res.json({ categories: data.categories || [] });
 });
 
-app.get('/api/news/:slug', (req, res) => {
-  const db = readDB();
-  let article = db.articles.find(a => a.slug === req.params.slug);
-  // 後備：如果按 slug 找不到，嘗試按 ID 查找
-  if (!article) {
-    const numericId = parseInt(req.params.slug);
-    if (!isNaN(numericId)) {
-      article = db.articles.find(a => a.id === numericId);
+app.get('/api/news/:slug', async (req, res) => {
+  try {
+    const article = await findArticle(req.params.slug);
+    if (!article) return res.status(404).json({ error: '文章不存在' });
+
+    // 增加瀏覽數
+    const newViewCount = (article.viewCount || 0) + 1;
+    article.viewCount = newViewCount;
+    await incrementArticleView(article.id, newViewCount);
+
+    // 獲取相關新聞
+    const allArticles = await fetchAllArticles();
+    const related = allArticles
+      .filter(a => a.category === article.category && a.id !== article.id)
+      .sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt))
+      .slice(0, 4);
+    res.json({ article, related });
+  } catch(e) {
+    console.error('GET /api/news/:slug 錯誤:', e.message);
+    res.status(500).json({ error: '伺服器錯誤' });
+  }
+});
+
+app.post('/api/news', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { title, content, excerpt, category, coverImageUrl } = req.body;
+    if (!title || !content) return res.status(400).json({ error: '標題和正文為必填項' });
+
+    // 只用 ASCII 字符生成 slug，避免中文編碼問題
+    const slugBase = title.toLowerCase()
+      .replace(/[^\w]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'article';
+    const slug = (slugBase || 'article') + '-' + Date.now();
+
+    // 生成新 ID
+    let newId;
+    if (USE_SUPABASE) {
+      newId = Date.now();
+    } else {
+      const db = readDB();
+      newId = db.nextId++;
     }
+
+    const article = {
+      id: newId,
+      title, slug,
+      excerpt: excerpt || title,
+      content: content.startsWith('<') ? content : content
+        .split(/\n\s*\n/)
+        .filter(p => p.trim())
+        .map(p => '<p>' + p.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>') + '</p>')
+        .join(''),
+      coverImageUrl: coverImageUrl || '',
+      publishedAt: new Date().toISOString(),
+      viewCount: 0,
+      category: category || '澳門',
+      author: req.user.nickname || '管理員'
+    };
+
+    const saved = await insertArticleRecord(article);
+    res.status(201).json({ success: true, article: saved });
+  } catch(e) {
+    console.error('POST /api/news 錯誤:', e.message);
+    res.status(500).json({ error: '發佈失敗: ' + e.message });
   }
-  // 後備：嘗試 decodeURIComponent 後再匹配
-  if (!article) {
-    try {
-      const decoded = decodeURIComponent(req.params.slug);
-      article = db.articles.find(a => a.slug === decoded);
-    } catch(e) {}
+});
+
+app.put('/api/news/:id', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { title, content, excerpt, category, coverImageUrl } = req.body;
+    const fields = {};
+    if (title !== undefined) fields.title = title;
+    if (content !== undefined) fields.content = content;
+    if (excerpt !== undefined) fields.excerpt = excerpt;
+    if (category !== undefined) fields.category = category;
+    if (coverImageUrl !== undefined) fields.coverImageUrl = coverImageUrl;
+
+    const updated = await updateArticleRecord(req.params.id, fields);
+    if (!updated) return res.status(404).json({ error: '文章不存在' });
+    res.json({ success: true, article: updated });
+  } catch(e) {
+    console.error('PUT /api/news/:id 錯誤:', e.message);
+    res.status(500).json({ error: '更新失敗' });
   }
-  if (!article) return res.status(404).json({ error: '文章不存在' });
-  article.viewCount = (article.viewCount || 0) + 1;
-  writeDB(db);
-  const related = db.articles
-    .filter(a => a.category === article.category && a.id !== article.id)
-    .sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt))
-    .slice(0, 4);
-  res.json({ article, related });
 });
 
-app.post('/api/news', authMiddleware, adminMiddleware, (req, res) => {
-  const { title, content, excerpt, category, coverImageUrl } = req.body;
-  if (!title || !content) return res.status(400).json({ error: '標題和正文為必填項' });
-  const db = readDB();
-  // 只用 ASCII 字符生成 slug，避免中文編碼問題
-  const slugBase = title.toLowerCase()
-    .replace(/[^\w]+/g, '-')
-    .replace(/^-+|-+$/g, '') || 'article';
-  const slug = (slugBase || 'article') + '-' + Date.now();
-  const article = {
-    id: db.nextId++,
-    title, slug,
-    excerpt: excerpt || title,
-    content: content.startsWith('<') ? content : content
-      .split(/\n\s*\n/)
-      .filter(p => p.trim())
-      .map(p => '<p>' + p.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>') + '</p>')
-      .join(''),
-    coverImageUrl: coverImageUrl || '',
-    publishedAt: new Date().toISOString(),
-    viewCount: 0,
-    category: category || '澳門',
-    author: req.user.nickname || '管理員'
-  };
-  db.articles.unshift(article);
-  writeDB(db);
-  res.status(201).json({ success: true, article });
+app.delete('/api/news/:id', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    await deleteArticleRecord(req.params.id);
+    res.json({ success: true });
+  } catch(e) {
+    console.error('DELETE /api/news/:id 錯誤:', e.message);
+    res.status(500).json({ error: '刪除失敗' });
+  }
 });
 
-app.put('/api/news/:id', authMiddleware, adminMiddleware, (req, res) => {
-  const db = readDB();
-  const article = db.articles.find(a => a.id === parseInt(req.params.id));
-  if (!article) return res.status(404).json({ error: '文章不存在' });
-  const { title, content, excerpt, category, coverImageUrl } = req.body;
-  if (title) article.title = title;
-  if (content) article.content = content;
-  if (excerpt) article.excerpt = excerpt;
-  if (category) article.category = category;
-  if (coverImageUrl !== undefined) article.coverImageUrl = coverImageUrl;
-  writeDB(db);
-  res.json({ success: true, article });
-});
-
-app.delete('/api/news/:id', authMiddleware, adminMiddleware, (req, res) => {
-  const db = readDB();
-  const idx = db.articles.findIndex(a => a.id === parseInt(req.params.id));
-  if (idx === -1) return res.status(404).json({ error: '文章不存在' });
-  db.articles.splice(idx, 1);
-  writeDB(db);
-  res.json({ success: true });
-});
-
-// ============ 圖片上傳 API ============
+// ============ 圖片上傳 API（轉為 Data URL，永久保存）============
 
 app.post('/api/upload/image', authMiddleware, adminMiddleware, upload.single('image'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: '未選擇圖片' });
-  const protocol = req.protocol;
-  const host = req.get('host');
-  const imageUrl = protocol + '://' + host + '/uploads/' + req.file.filename;
-  res.json({ success: true, url: imageUrl, filename: req.file.filename, size: req.file.size });
+  // 將圖片轉為 Data URL（base64），存入資料庫後永久保存
+  const dataUrl = 'data:' + req.file.mimetype + ';base64,' + req.file.buffer.toString('base64');
+  res.json({ success: true, url: dataUrl, filename: req.file.originalname, size: req.file.size });
 });
 
 // ============ 靜態文件託管 ============
@@ -342,11 +563,20 @@ app.get('*', (req, res) => {
 
 // ============ 啟動伺服器 ============
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log('\n========================================');
   console.log('  澳門最新聞伺服器已啟動');
   console.log('  端口: ' + PORT);
   console.log('  模式: 郵箱認證');
+  console.log('  資料庫: ' + (USE_SUPABASE ? 'Supabase' : 'JSON 文件'));
   console.log('  管理員電郵: ' + (ADMIN_EMAILS.join(', ') || '（未配置）'));
+  if (USE_SUPABASE) {
+    console.log('  Supabase: ' + SUPABASE_URL);
+  }
   console.log('========================================\n');
+
+  // 如果使用 Supabase，啟動時檢查並填入初始數據
+  if (USE_SUPABASE) {
+    await seedIfEmpty();
+  }
 });
