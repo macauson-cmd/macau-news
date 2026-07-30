@@ -80,6 +80,38 @@ fi
 echo -e "${GREEN}  文件完整性驗證通過${NC}"
 
 # ===========================================
+# 第 4.5 步：安裝 npm 依賴
+# ===========================================
+echo -e "${YELLOW}[4.5/8] 安裝 npm 依賴...${NC}"
+
+# 創建 package.json
+cat > ${APP_DIR}/package.json << 'PKGJSON'
+{
+  "name": "macau-news",
+  "version": "1.0.0",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^4.21.0",
+    "multer": "^1.4.5-lts.1",
+    "jsonwebtoken": "^9.0.2",
+    "cors": "^2.8.5"
+  }
+}
+PKGJSON
+
+cd ${APP_DIR}
+npm install --production 2>&1 | tail -5
+echo -e "${GREEN}  npm 依賴已安裝${NC}"
+
+# 驗證 Express 版本為 4.x（Express 5 不支援 '*' 路由）
+EXPR_VER=$(node -e "console.log(require('express/package.json').version)" 2>/dev/null)
+if [[ "${EXPR_VER}" == 5* ]]; then
+  echo -e "${YELLOW}  偵測到 Express 5，降級到 Express 4...${NC}"
+  npm install express@4 --save 2>&1 | tail -3
+fi
+echo -e "${GREEN}  Express 版本: ${EXPR_VER}${NC}"
+
+# ===========================================
 # 第 5 步：配置 PM2 啟動應用
 # ===========================================
 echo -e "${YELLOW}[5/8] 配置 PM2...${NC}"
