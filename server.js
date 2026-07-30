@@ -75,6 +75,7 @@ const GITHUB_REPO = 'macau-news';
 const GITHUB_DB_PATH = 'data/db.json';
 let _githubSha = null;
 let _syncTimer = null;
+let _dbReady = false;
 
 const app = express();
 
@@ -130,11 +131,13 @@ function readDB() {
 function writeDB(data) {
   try {
     fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf-8');
-    // 延遲同步到 GitHub（避免頻繁 API 調用）
-    if (_syncTimer) clearTimeout(_syncTimer);
-    _syncTimer = setTimeout(() => {
-      githubSave().catch(e => console.error('GitHub 同步失敗:', e.message));
-    }, 3000);
+    // 延遲同步到 GitHub（僅在資料庫就緒後才同步，避免種子數據覆蓋遠端）
+    if (_dbReady) {
+      if (_syncTimer) clearTimeout(_syncTimer);
+      _syncTimer = setTimeout(() => {
+        githubSave().catch(e => console.error('GitHub 同步失敗:', e.message));
+      }, 3000);
+    }
   } catch (e) {
     console.error('寫入數據庫失敗（可能為唯讀文件系統）:', e.message);
   }
@@ -165,6 +168,7 @@ async function githubLoad() {
 }
 
 async function githubSave() {
+  if (!_dbReady) return;
   try {
     const content = fs.readFileSync(DB_FILE, 'utf-8');
     const b64 = Buffer.from(content).toString('base64');
@@ -443,9 +447,26 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     database: USE_SUPABASE ? 'supabase' : 'json-file',
     storage: 'github-sync',
+    dbReady: _dbReady,
     githubRepo: GITHUB_OWNER + '/' + GITHUB_REPO,
     githubSha: _githubSha ? 'synced' : 'pending'
   });
+});
+
+// ============ DB 就緒中間件（防止啟動時競態條件）============
+
+app.use('/api', async (req, res, next) => {
+  if (!_dbReady) {
+    // 等待最多 5 秒讓資料庫從 GitHub 載入完成
+    for (let i = 0; i < 50; i++) {
+      if (_dbReady) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (!_dbReady) {
+      return res.status(503).json({ error: '伺服器正在初始化，請稍後再試' });
+    }
+  }
+  next();
 });
 
 // ============ 圖片上傳配置（記憶體存儲，轉為 Data URL）============
@@ -665,14 +686,27 @@ app.listen(PORT, async () => {
   console.log('  管理員電郵: ' + (ADMIN_EMAILS.join(', ') || '（未配置）'));
   console.log('========================================\n');
 
-  // 從 GitHub 載入資料庫（永久存儲）
+  // 從 GitHub 載入資料庫（永久存儲）— 必須在接受請求前完成！
   console.log('正在從 GitHub 載入資料庫...');
-  const loaded = await githubLoad();
+  // 清除可能殘留的同步定時器，防止種子數據覆蓋遠端
+  if (_syncTimer) { clearTimeout(_syncTimer); _syncTimer = null; }
+  let loaded = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    loaded = await githubLoad();
+    if (loaded) break;
+    if (attempt < 3) {
+      console.log('  載入失敗，重試 (' + attempt + '/3)...');
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
   if (!loaded && !fs.existsSync(DB_FILE)) {
-    console.log('初始化資料庫...');
+    console.log('GitHub 載入失敗，使用初始數據');
     const initial = getInitialData();
     writeDB(initial);
   }
+  // 標記資料庫就緒 — 之後的寫入操作才允許同步到 GitHub
+  _dbReady = true;
+  console.log('資料庫就緒，開始接受請求');
 
   // 如果使用 Supabase，啟動時檢查並填入初始數據
   if (USE_SUPABASE) {
